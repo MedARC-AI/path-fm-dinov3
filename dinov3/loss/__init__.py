@@ -6,4 +6,5 @@
 from .dino_clstoken_loss import DINOLoss
 from .gram_loss import GramLoss
 from .ibot_patch_loss import iBOTPatchLoss
+from .kde_loss import KDELoss
 from .koleo_loss import KoLeoLoss, KoLeoLossDistributed

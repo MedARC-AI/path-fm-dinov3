@@ -40,7 +40,7 @@ student: # see vit_huge2 in dinov3/models/vision_transformer.py
   pos_embed_rope_normalize_coords: separate
   pos_embed_rope_rescale_coords: 2.0
   pos_embed_rope_dtype: fp32
-  resume_from_teacher_chkpt: ./checkpoints/dinov3_vith16plus_saved_teacher.pth
+  resume_from_teacher_chkpt: ./checkpoints/dinov3_vith16plus_random_teacher.pth
 optim:
   epochs: 40 # 1000
   early_stop: 9999
@@ -52,10 +52,16 @@ optim:
 crops:
   use_pathology_hed: true
 evaluation:
-  eval_period_iterations: 12500
+  eval_period_iterations: 12500 # save eval ckpt every x iterations (to be used for downstream)
 checkpointing:
-  period: 1000
+  period: 1000 # save training state every x iterations (to resume interrupted training runs)
   keep_every: 10000
 logging:
   use_wandb: true
   project: path-fm-dinov3
+  entity: null
+  group: null
+  job_type: null
+  run_name: null
+  tags: []
+  artifact_logging: true

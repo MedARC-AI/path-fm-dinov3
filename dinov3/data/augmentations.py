@@ -4,15 +4,33 @@
 # the terms of the DINOv3 License Agreement.
 
 import logging
+import random
 
 import numpy as np
 import torch
+from PIL import Image
+from skimage.color import hed2rgb, rgb2hed
 from torch import nn
 from torchvision.transforms import v2
 
 from dinov3.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, GaussianBlur, make_normalize_transform
 
 logger = logging.getLogger("dinov3")
+
+
+class HEDJitter:
+    def __init__(self, delta: float = 0.05, skip_prob: float = 0.5):
+        self.delta = delta
+        self.skip_prob = skip_prob
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        if random.random() < self.skip_prob:
+            return image
+        hed = rgb2hed(np.asarray(image).astype(np.float32) / 255.0)
+        noise = np.random.uniform(-self.delta, self.delta, size=hed.shape)
+        hed = np.clip(hed + noise, 0.0, 1.0)
+        rgb = np.clip(hed2rgb(hed), 0.0, 1.0)
+        return Image.fromarray((rgb * 255.0).astype(np.uint8))
 
 
 class DataAugmentationDINO(object):
@@ -32,6 +50,7 @@ class DataAugmentationDINO(object):
         horizontal_flips=True,
         mean=IMAGENET_DEFAULT_MEAN,
         std=IMAGENET_DEFAULT_STD,
+        use_pathology_hed=False,
     ):
         self.global_crops_scale = global_crops_scale
         self.local_crops_scale = local_crops_scale
@@ -46,6 +65,7 @@ class DataAugmentationDINO(object):
         self.share_color_jitter = share_color_jitter
         self.mean = mean
         self.std = std
+        self.use_pathology_hed = use_pathology_hed
 
         logger.info("###################################")
         logger.info("Using data augmentation parameters:")
@@ -61,6 +81,7 @@ class DataAugmentationDINO(object):
         logger.info(f"patch_size if local_crops_subset_of_global_crops: {patch_size}")
         logger.info(f"share_color_jitter: {share_color_jitter}")
         logger.info(f"horizontal flips: {horizontal_flips}")
+        logger.info(f"use_pathology_hed: {use_pathology_hed}")
         logger.info("###################################")
 
         # Global crops and gram teacher crops can have different sizes. We first take a crop of the maximum size
@@ -119,24 +140,32 @@ class DataAugmentationDINO(object):
         )
 
         # color distortions / blurring
-        color_jittering = v2.Compose(
-            [
-                v2.RandomApply(
-                    [v2.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                    p=0.8,
-                ),
-                v2.RandomGrayscale(p=0.2),
-            ]
-        )
+        if self.use_pathology_hed:
+            jitter_params = dict(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05)
+        else:
+            jitter_params = dict(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
+        color_ops = [
+            v2.RandomApply(
+                [v2.ColorJitter(**jitter_params)],
+                p=0.8,
+            ),
+            v2.RandomGrayscale(p=0.2),
+        ]
+        if self.use_pathology_hed:
+            color_ops.insert(0, HEDJitter())
+        color_jittering = v2.Compose(color_ops)
 
         global_transfo1_extra = GaussianBlur(p=1.0)
 
-        global_transfo2_extra = v2.Compose(
-            [
-                GaussianBlur(p=0.1),
-                v2.RandomSolarize(threshold=128, p=0.2),
-            ]
-        )
+        if self.use_pathology_hed:
+            global_transfo2_extra = GaussianBlur(p=0.1)
+        else:
+            global_transfo2_extra = v2.Compose(
+                [
+                    GaussianBlur(p=0.1),
+                    v2.RandomSolarize(threshold=128, p=0.2),
+                ]
+            )
 
         local_transfo_extra = GaussianBlur(p=0.5)
 

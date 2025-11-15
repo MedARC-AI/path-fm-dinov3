@@ -329,67 +329,67 @@ class DinoVisionTransformer(nn.Module):
             return self.head(ret["x_norm_clstoken"])
 
 
-def vit_small(patch_size=16, **kwargs):
+def vit_small(patch_size=16, ffn_ratio=4, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=384,
         depth=12,
         num_heads=6,
-        ffn_ratio=4,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model
 
 
-def vit_base(patch_size=16, **kwargs):
+def vit_base(patch_size=16, ffn_ratio=4, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=768,
         depth=12,
         num_heads=12,
-        ffn_ratio=4,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model
 
 
-def vit_large(patch_size=16, **kwargs):
+def vit_large(patch_size=16, ffn_ratio=4, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=1024,
         depth=24,
         num_heads=16,
-        ffn_ratio=4,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model
 
 
-def vit_so400m(patch_size=16, **kwargs):
+def vit_so400m(patch_size=16, ffn_ratio=3.777777778, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=1152,
         depth=27,
         num_heads=18,
-        ffn_ratio=3.777777778,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model
 
 
-def vit_huge2(patch_size=16, **kwargs):
+def vit_huge2(patch_size=16, ffn_ratio=4, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=1280,
         depth=32,
         num_heads=20,
-        ffn_ratio=4,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model
 
 
-def vit_giant2(patch_size=16, **kwargs):
+def vit_giant2(patch_size=16, ffn_ratio=4, **kwargs):
     """
     Close to ViT-giant, with embed-dim 1536 and 24 heads => embed-dim per head 64
     """
@@ -398,19 +398,19 @@ def vit_giant2(patch_size=16, **kwargs):
         embed_dim=1536,
         depth=40,
         num_heads=24,
-        ffn_ratio=4,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model
 
 
-def vit_7b(patch_size=16, **kwargs):
+def vit_7b(patch_size=16, ffn_ratio=3, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
         embed_dim=4096,
         depth=40,
         num_heads=32,
-        ffn_ratio=3,
+        ffn_ratio=ffn_ratio,
         **kwargs,
     )
     return model

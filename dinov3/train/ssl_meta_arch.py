@@ -17,7 +17,7 @@ from dinov3.configs import get_default_config
 from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
-from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
+from dinov3.loss import DINOLoss, GramLoss, KDELoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
 from dinov3.models import build_model_from_cfg
 from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
@@ -80,6 +80,11 @@ class SSLMetaArch(nn.Module):
         student_model_dict["dino_head"] = dino_head_class()
         teacher_model_dict["dino_head"] = dino_head_class()
         self.dino_loss = DINOLoss(self.dino_out_dim)
+        self.kde_loss_weight = cfg.dino.kde_loss_weight
+        self.use_kde = self.kde_loss_weight > 0
+        if self.use_kde:
+            logger.info(f"OPTIONS -- KDE -- loss_weight: {cfg.dino.kde_loss_weight}")
+            self.kde_loss = KDELoss()
 
         logger.info("OPTIONS -- KOLEO")
         logger.info(f"OPTIONS -- KOLEO -- loss_weight: {cfg.dino.koleo_loss_weight}")
@@ -602,6 +607,7 @@ class SSLMetaArch(nn.Module):
         dino_global_scale = dino_global_terms / (dino_global_terms + dino_local_terms)
         dino_local_scale = dino_local_terms / (dino_global_terms + dino_local_terms)
         koleo_scale = n_global_crops
+        kde_scale = n_global_crops
 
         # DINO local loss: compare post-head CLS tokens: student(local crops) vs. teacher(global crops)
         dino_local_crops_loss = self.dino_loss(
@@ -632,6 +638,11 @@ class SSLMetaArch(nn.Module):
         koleo_loss = sum(self.koleo_loss(x) for x in student_global["cls_pre_head"]) / n_global_crops
         loss_dict["koleo_loss"] = koleo_loss
         loss_accumulator += self.dino_koleo_loss_weight * koleo_scale * koleo_loss
+
+        if self.use_kde:
+            kde_loss = sum(self.kde_loss(x) for x in student_global["cls_pre_head"]) / n_global_crops
+            loss_dict["kde_loss"] = kde_loss
+            loss_accumulator += self.kde_loss_weight * kde_scale * kde_loss
 
         # IBOT loss
         ibot_patch_loss = self.ibot_patch_loss.forward_masked(
@@ -754,6 +765,7 @@ class SSLMetaArch(nn.Module):
             horizontal_flips=cfg.crops.horizontal_flips,
             mean=cfg.crops.rgb_mean,
             std=cfg.crops.rgb_std,
+            use_pathology_hed=cfg.crops.use_pathology_hed,
         )
 
     def get_maybe_fused_params_for_submodel(self, m: nn.Module):

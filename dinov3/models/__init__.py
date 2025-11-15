@@ -51,6 +51,7 @@ def build_model(args, only_teacher=False, img_size=224, device=None):
             proj_bias=args.proj_bias,
             n_storage_tokens=args.n_storage_tokens,
             mask_k_bias=args.mask_k_bias,
+            ffn_ratio=args.ffn_ratio,
             untie_cls_and_patch_norms=args.untie_cls_and_patch_norms,
             untie_global_and_local_cls_norm=args.untie_global_and_local_cls_norm,
             device=device,

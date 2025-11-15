@@ -8,3 +8,4 @@ from .coco_captions import CocoCaptions
 from .image_net import ImageNet
 from .image_net_22k import ImageNet22k
 from .nyu import NYU
+from .slide_dataset import SlideDataset
