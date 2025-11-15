@@ -5,12 +5,12 @@ export MASTER_ADDR=$(hostname -I | awk '{print $1}')
 export MASTER_PORT=29502
 
 export NNODES=1
-export NPROC_PER_NODE=4
-export CUDA_VISIBLE_DEVICES="0,1,2,3"
+export NPROC_PER_NODE=8
+export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export NODE_RANK=0
 
 CONFIG_FILE="./dinov3/configs/train/vith16plus.yaml"
-OUTPUT_DIR="./output_vith16plus_4gpu"
+OUTPUT_DIR="./output_vith16plus_8gpu"
 RESUME="False"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

@@ -734,14 +734,11 @@ def do_train(cfg, model, resume=False):
                     wandb_log[f"train/{key}"] = value.item() if isinstance(value, torch.Tensor) else float(value)
                 wandb_module.log(wandb_log, step=iteration)
 
-            if (
-                cfg.evaluation.eval_period_iterations > 0
-                and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
-            ):
+            if iteration % cfg.evaluation.eval_period_iterations == 0:
                 do_test(cfg, model, f"training_{iteration}", process_group=process_subgroup)
                 torch.cuda.synchronize()
 
-            if (iteration + 1) % cfg.checkpointing.period == 0:
+            if iteration % cfg.checkpointing.period == 0:
                 torch.cuda.synchronize()
                 save_checkpoint(
                     ckpt_dir / str(iteration),
@@ -753,7 +750,7 @@ def do_train(cfg, model, resume=False):
                 )
                 if distributed.is_subgroup_main_process():
                     keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
-                    if "keep_every" in cfg.checkpointing and (iteration + 1) % cfg.checkpointing.keep_every == 0:
+                    if "keep_every" in cfg.checkpointing and iteration % cfg.checkpointing.keep_every == 0:
                         keep_checkpoint_copy(ckpt_dir / str(iteration))
 
             iteration = iteration + 1

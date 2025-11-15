@@ -14,11 +14,13 @@ from typing import List, Sequence
 
 import torch
 import torch.distributed as dist
+from torch.distributed.distributed_c10d import get_process_group_ranks
 
 logger = logging.getLogger("dinov3")
 
 _DEFAULT_PROCESS_GROUP = None
 _PROCESS_SUBGROUP = None
+_CHECKPOINT_PROCESS_GROUPS = {}
 _BUILTIN_PRINT = None
 
 
@@ -288,6 +290,11 @@ def disable_distributed() -> None:
         torch.distributed.destroy_process_group(_PROCESS_SUBGROUP)
         _PROCESS_SUBGROUP = None
 
+    global _CHECKPOINT_PROCESS_GROUPS
+    for pg in _CHECKPOINT_PROCESS_GROUPS.values():
+        torch.distributed.destroy_process_group(pg)
+    _CHECKPOINT_PROCESS_GROUPS.clear()
+
     global _DEFAULT_PROCESS_GROUP
     if _DEFAULT_PROCESS_GROUP is not None:  # not initialized
         torch.distributed.destroy_process_group(_DEFAULT_PROCESS_GROUP)
@@ -325,6 +332,24 @@ def get_process_subgroup():
         The process subgroup of this rank (or None).
     """
     return _PROCESS_SUBGROUP or _DEFAULT_PROCESS_GROUP
+
+
+def get_checkpoint_process_group(base_group=None):
+    """Create or return a Gloo group matching ``base_group`` ranks for checkpoint I/O."""
+
+    if not is_distributed_enabled():
+        return None
+
+    if base_group is None:
+        base_group = get_process_subgroup()
+
+    key = id(base_group)
+    checkpoint_pg = _CHECKPOINT_PROCESS_GROUPS.get(key)
+    if checkpoint_pg is None:
+        ranks = get_process_group_ranks(base_group)
+        checkpoint_pg = torch.distributed.new_group(ranks=ranks, backend="gloo")
+        _CHECKPOINT_PROCESS_GROUPS[key] = checkpoint_pg
+    return checkpoint_pg
 
 
 def get_subgroup_rank() -> int:

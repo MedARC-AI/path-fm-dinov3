@@ -39,6 +39,8 @@ import torch.distributed.checkpoint.filesystem as dcpfs
 import torch.distributed.checkpoint.state_dict as dcpsd
 from torch.distributed.checkpoint.stateful import Stateful
 
+from dinov3 import distributed
+
 logger = logging.getLogger("dinov3")
 
 
@@ -83,17 +85,19 @@ def save_checkpoint(
     **others: Stateful,
 ):
     """Save a plain/DDP/FSDP/FSDP2 model, its optimizer, an integer iteration and other stateful objects."""
-    rank = torch.distributed.get_rank(group=process_group)
+    if process_group is None:
+        process_group = distributed.get_process_subgroup()
+    checkpoint_group = distributed.get_checkpoint_process_group(process_group)
+
+    rank = torch.distributed.get_rank(group=checkpoint_group)
 
     # Rank 0 checks if the checkpoint directory exists, but all ranks need to know if if exists,
     # so they can raise an error when overwrite is False. If overwrite is True, rank 0 will delete it
     # and other ranks wait for the deletion to finish.
     ckpt_dir = Path(ckpt_dir)
     ckpt_dir_exists = [ckpt_dir.exists() if rank == 0 else None]
-    src_rank = 0
-    if process_group is not None:
-        src_rank = torch.distributed.get_global_rank(group=process_group, group_rank=0)
-    torch.distributed.broadcast_object_list(ckpt_dir_exists, src=src_rank, group=process_group)
+    src_rank = torch.distributed.get_global_rank(group=checkpoint_group, group_rank=0)
+    torch.distributed.broadcast_object_list(ckpt_dir_exists, src=src_rank, group=checkpoint_group)
     ckpt_dir_exists = ckpt_dir_exists[0]
     if ckpt_dir_exists:
         if overwrite:
@@ -103,14 +107,14 @@ def save_checkpoint(
                 else:
                     ckpt_dir.unlink()
                 logger.info(f"Deleted: {ckpt_dir}")
-            torch.distributed.barrier(group=process_group)
+            torch.distributed.barrier(group=checkpoint_group)
         else:
             raise RuntimeError(f"Checkpoint already exists: {ckpt_dir}")
 
     # Rank 0 creates a temporary directory for the checkpoint and broadcasts the name to all ranks.
     ckpt_dir.parent.mkdir(parents=True, exist_ok=True)
     ckpt_dir_tmp = [tempfile.mkdtemp(dir=ckpt_dir.parent, prefix=ckpt_dir.name) if rank == 0 else None]
-    torch.distributed.broadcast_object_list(ckpt_dir_tmp, src=src_rank, group=process_group)
+    torch.distributed.broadcast_object_list(ckpt_dir_tmp, src=src_rank, group=checkpoint_group)
     ckpt_dir_tmp = Path(ckpt_dir_tmp[0])
 
     to_save = {"iteration": iteration}
@@ -121,13 +125,13 @@ def save_checkpoint(
     dcp.save(
         to_save,
         storage_writer=dcpfs.FileSystemWriter(ckpt_dir_tmp),
-        process_group=process_group,
+        process_group=checkpoint_group,
     )
 
     # Rank 0 renames the temporary directory to the final checkpoint directory. All ranks wait for the rename.
     if rank == 0:
         ckpt_dir_tmp.rename(ckpt_dir)
-    torch.distributed.barrier()
+    torch.distributed.barrier(group=checkpoint_group)
 
     logger.info(f"Saved: {ckpt_dir}")
 
@@ -152,11 +156,15 @@ def load_checkpoint(
     if optimizer is not None:
         to_load["optimizer"] = dcpsd.get_optimizer_state_dict(model, optimizer)
     to_load.update(others)
+    if process_group is None:
+        process_group = distributed.get_process_subgroup()
+    checkpoint_group = distributed.get_checkpoint_process_group(process_group)
+
     dcp.load(
         to_load,
         storage_reader=dcpfs.FileSystemReader(ckpt_dir),
         planner=dcp.default_planner.DefaultLoadPlanner(allow_partial_load=not strict_loading),
-        process_group=process_group,
+        process_group=checkpoint_group,
     )
     iteration = to_load["iteration"]
     dcpsd.set_model_state_dict(model, to_load["model"])

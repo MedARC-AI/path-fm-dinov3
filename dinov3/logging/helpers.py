@@ -70,6 +70,9 @@ class MetricLogger(object):
         end = time.time()
         iter_time = SmoothedValue(fmt="{avg:.6f}")
         data_time = SmoothedValue(fmt="{avg:.6f}")
+        interval_time = 0.0
+        interval_data_time = 0.0
+        steps_since_last_log = 0
 
         if n_iterations is None:
             n_iterations = len(iterable)
@@ -83,6 +86,8 @@ class MetricLogger(object):
             "{meters}",
             "time: {time}",
             "data: {data}",
+            "last {interval_steps} steps: {recent_iter_time:.6f}s",
+            "data wait: {recent_data_time:.6f}s",
         ]
         if torch.cuda.is_available():
             log_list += ["mem: {current_memory:.0f}"]
@@ -94,13 +99,23 @@ class MetricLogger(object):
             if i >= n_iterations:
                 break
 
-            data_time.update(time.time() - end)
+            current_time = time.time()
+            data_elapsed = current_time - end
+            data_time.update(data_elapsed)
+            interval_data_time += data_elapsed
             yield obj
-            iter_time.update(time.time() - end)
+            iter_end_time = time.time()
+            iter_elapsed = iter_end_time - end
+            iter_time.update(iter_elapsed)
+            interval_time += iter_elapsed
+            steps_since_last_log += 1
             if i % print_freq == 0 or i == n_iterations - 1:
                 self.dump_in_output_file(iteration=i, iter_time=iter_time.avg, data_time=data_time.avg)
                 eta_seconds = iter_time.global_avg * (n_iterations - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                recent_iter_time = interval_time
+                recent_data_time = interval_data_time
+                interval_steps = steps_since_last_log if steps_since_last_log > 0 else print_freq
                 if torch.cuda.is_available():
                     logger.info(
                         log_msg.format(
@@ -110,6 +125,9 @@ class MetricLogger(object):
                             meters=str(self),
                             time=str(iter_time),
                             data=str(data_time),
+                            interval_steps=interval_steps,
+                            recent_iter_time=recent_iter_time,
+                            recent_data_time=recent_data_time,
                             current_memory=torch.cuda.memory_allocated() / MB,
                             max_memory=torch.cuda.max_memory_allocated() / MB,
                         )
@@ -123,10 +141,16 @@ class MetricLogger(object):
                             meters=str(self),
                             time=str(iter_time),
                             data=str(data_time),
+                            interval_steps=interval_steps,
+                            recent_iter_time=recent_iter_time,
+                            recent_data_time=recent_data_time,
                         )
                     )
+                interval_time = 0.0
+                interval_data_time = 0.0
+                steps_since_last_log = 0
             i += 1
-            end = time.time()
+            end = iter_end_time
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         s_it = total_time / n_iterations if n_iterations > 0 else 0

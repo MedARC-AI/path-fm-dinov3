@@ -7,6 +7,7 @@
 from .torch_distributed_wrapper import (
     disable_distributed as disable,
     enable_distributed as enable,
+    get_checkpoint_process_group,
     get_default_process_group,
     get_process_subgroup,
     get_rank,

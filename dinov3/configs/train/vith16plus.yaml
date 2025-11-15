@@ -12,7 +12,7 @@ ibot:
 gram:
   use_loss: false # (bool) if true gram is used, else not
 train:
-  batch_size_per_gpu: 64
+  batch_size_per_gpu: 56
   num_workers: 4
   OFFICIAL_EPOCH_LENGTH: 1250
   centering: sinkhorn_knopp
