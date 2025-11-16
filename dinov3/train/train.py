@@ -634,7 +634,7 @@ def do_train(cfg, model, resume=False):
             data_loader,
             print_freq=10,
             header="Training",
-            n_iterations=stop_iter,
+            n_iterations=stop_iter + 1, # needed or else final ckpt won't be saved
             start_iteration=start_iter,
         ):
             if iteration >= stop_iter:
