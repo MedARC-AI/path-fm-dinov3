@@ -35,7 +35,6 @@ tmp
 
 # specific files
 output*
-sample_dataset_30.txt
 uv.lock 
 wandb/
 HEST/

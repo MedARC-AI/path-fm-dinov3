@@ -16,12 +16,14 @@ from pathlib import Path
 
 import torch
 import torch.distributed
+
 from datasets import load_dataset
 from PIL import Image, ImageOps
 from torch.distributed._tensor import DTensor
 from omegaconf import OmegaConf
 
 import dinov3.distributed as distributed
+from dinov3.models import build_model_for_eval
 from dinov3.checkpointer import (
     find_latest_checkpoint,
     keep_checkpoint_copy,
@@ -44,13 +46,18 @@ from dinov3.train.cosine_lr_scheduler import CosineScheduler, linear_warmup_cosi
 from dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
 from dinov3.train.ssl_meta_arch import SSLMetaArch
 
+from torchvision.datasets import folder
+from torchvision.transforms import v2
+from tqdm import tqdm
+
 assert torch.__version__ >= (2, 1)
 torch.backends.cuda.matmul.allow_tf32 = True  # pytorch 1.12 sets this to false by default
 torch.backends.cudnn.benchmark = False  # True
 
 logger = logging.getLogger("dinov3")
 CONFIG_FILE_PATH: str | None = None
-
+wandb_module = None
+wandb_run = None
 
 def get_args_parser(add_help: bool = True):
     parser = argparse.ArgumentParser("DINOv3 training", add_help=add_help)
@@ -383,19 +390,203 @@ def do_test(cfg, model, iteration, process_group, do_low_freq=False):
         save_checkpoint(
             ckpt_dir=ckpt_path, iteration=iteration, model=teacher_backbone, overwrite=True, process_group=process_group
         )
-        if not distributed.is_subgroup_main_process():
-            return
-    else:
-        new_state_dict = model.model_ema.state_dict()
-        for k, tensor in list(new_state_dict.items()):
-            if isinstance(tensor, DTensor):
-                new_state_dict[k] = tensor.full_tensor()
-        if not distributed.is_subgroup_main_process():
-            return
-        # save teacher checkpoint
-        ckpt_path = eval_dir / "teacher_checkpoint.pth"
-        torch.save({"teacher": new_state_dict}, ckpt_path)
-        logger.info("Saved eval checkpoint: %s", ckpt_path)
+    new_state_dict = model.model_ema.state_dict()
+    for k, tensor in list(new_state_dict.items()):
+        if isinstance(tensor, DTensor):
+            new_state_dict[k] = tensor.full_tensor()
+    if not distributed.is_subgroup_main_process():
+        return
+    ckpt_path = eval_dir / "teacher_checkpoint.pth"
+    torch.save({"teacher": new_state_dict}, ckpt_path)
+    logger.info("Saved eval checkpoint: %s", ckpt_path)
+
+    if not distributed.is_main_process():
+        return
+
+    teacher = build_model_for_eval(cfg, str(ckpt_path))
+    teacher.eval()
+    teacher.requires_grad_(False)
+
+    device = next(teacher.parameters()).device
+
+    class _ResizeAndCrop(v2.Compose):
+        def __init__(self, size=224, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
+            self._size = size
+            self._mean = mean
+            self._std = std
+            super().__init__(
+                transforms=[
+                    v2.Resize(size=self._size),
+                    v2.CenterCrop(size=self._size),
+                    v2.PILToTensor(),
+                    v2.ToDtype(torch.float32, scale=True),
+                    v2.Normalize(mean=self._mean, std=self._std),
+                ]
+            )
+
+    _BACH_TRAIN_INDEX_RANGES = [
+        (0, 41),
+        (59, 60),
+        (90, 139),
+        (169, 240),
+        (258, 260),
+        (273, 345),
+        (368, 400),
+    ]
+    _BACH_VAL_INDEX_RANGES = [
+        (41, 59),
+        (60, 90),
+        (139, 169),
+        (240, 258),
+        (260, 273),
+        (345, 368),
+    ]
+    _BACH_CLASS_TO_IDX = {"Benign": 0, "InSitu": 1, "Invasive": 2, "Normal": 3}
+
+    class _BACHDataset(torch.utils.data.Dataset):
+        def __init__(self, root, split, transform):
+            self.root = os.path.abspath(os.path.expanduser(root))
+            self.split = split
+            self.transform = transform
+            dataset_path = os.path.join(self.root, "ICIAR2018_BACH_Challenge", "Photos")
+            self.samples = folder.make_dataset(
+                directory=dataset_path,
+                class_to_idx=_BACH_CLASS_TO_IDX,
+                extensions=(".tif",),
+            )
+            if len(self.samples) == 0:
+                raise RuntimeError(f"No BACH images found in {dataset_path}")
+            if split == "train":
+                index_ranges = _BACH_TRAIN_INDEX_RANGES
+            elif split == "val":
+                index_ranges = _BACH_VAL_INDEX_RANGES
+            else:
+                raise ValueError("Invalid BACH split. Use 'train' or 'val'.")
+            indices = []
+            for start, end in index_ranges:
+                indices.extend(range(start, end))
+            self.indices = indices
+
+        def __len__(self):
+            return len(self.indices)
+
+        def __getitem__(self, idx):
+            image_path, target = self.samples[self.indices[idx]]
+            image = Image.open(image_path).convert("RGB")
+            if self.transform is not None:
+                image = self.transform(image)
+            target_tensor = torch.tensor(target, dtype=torch.long)
+            return image, target_tensor
+
+    transform = _ResizeAndCrop(
+        size=224,
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225],
+    )
+
+    bach_root = "/home/paul/dinov3/eva-probe/data/bach"
+
+    train_ds = _BACHDataset(root=bach_root, split="train", transform=transform)
+    val_ds = _BACHDataset(root=bach_root, split="val", transform=transform)
+
+    predict_batch_size = 64
+    num_workers = 4
+
+    def _compute_embeddings(dataset):
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=predict_batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+        feats = []
+        targets = []
+        with torch.no_grad():
+            for images, labels in loader:
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                out = teacher(images, is_training=True)
+                cls = out["x_norm_clstoken"]
+                feats.append(cls)
+                targets.append(labels)
+        feats = torch.cat(feats, dim=0)
+        targets = torch.cat(targets, dim=0)
+        return feats, targets
+
+    train_feats, train_targets = _compute_embeddings(train_ds)
+    val_feats, val_targets = _compute_embeddings(val_ds)
+
+    in_features = train_feats.shape[-1]
+    num_classes = 4
+    head = torch.nn.Linear(in_features, num_classes, bias=True).to(device)
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.AdamW(head.parameters(), lr=3e-4)
+
+    train_dataset = torch.utils.data.TensorDataset(train_feats, train_targets)
+    train_batch_size = 256
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=train_batch_size,
+        shuffle=True,
+        drop_last=False,
+    )
+
+    max_steps = 4000 # eva originally uses 12500 steps with patience-based early stopping
+    steps = 0
+    head.train()
+    with tqdm(total=max_steps) as pbar:
+        while steps < max_steps:
+            for feats_batch, targets_batch in train_loader:
+                feats_batch = feats_batch.to(device, non_blocking=True)
+                targets_batch = targets_batch.to(device, non_blocking=True)
+                logits = head(feats_batch)
+                loss = criterion(logits, targets_batch)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                steps += 1
+                pbar.update(1)
+                if steps >= max_steps:
+                    break
+
+    head.eval()
+    all_preds = []
+    all_targets = []
+    val_dataset = torch.utils.data.TensorDataset(val_feats, val_targets)
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=train_batch_size,
+        shuffle=False,
+        drop_last=False,
+    )
+    with torch.no_grad():
+        for feats_batch, targets_batch in val_loader:
+            feats_batch = feats_batch.to(device, non_blocking=True)
+            logits = head(feats_batch)
+            preds = logits.argmax(dim=1).cpu()
+            all_preds.append(preds)
+            all_targets.append(targets_batch.cpu())
+
+    preds = torch.cat(all_preds, dim=0)
+    targets = torch.cat(all_targets, dim=0)
+
+    conf = torch.zeros(num_classes, num_classes, dtype=torch.long)
+    indices = targets * num_classes + preds
+    bincount = torch.bincount(indices, minlength=num_classes * num_classes)
+    conf = bincount.view(num_classes, num_classes)
+    per_class = conf.diag().float() / conf.sum(dim=1).clamp_min(1)
+    bach_acc = float(per_class.mean().item())
+
+    logger.info("BACH val balanced accuracy (linear probe): %.4f", bach_acc)
+
+    if wandb_run is not None and wandb_module is not None and distributed.is_main_process():
+        if isinstance(iteration, int):
+            step = iteration
+        else:
+            s = str(iteration).split("_")[-1]
+            step = int(s)
+        wandb_module.log({"val/BACH_MULTICLASS_ACCURACY": bach_acc}, step=step)
 
 
 def build_data_loader_from_cfg(
@@ -522,6 +713,7 @@ def build_multi_resolution_data_loader_from_cfg(
 
 
 def do_train(cfg, model, resume=False):
+    global wandb_module, wandb_run
     process_subgroup = distributed.get_process_subgroup()
     ckpt_dir = Path(cfg.train.output_dir, "ckpt").expanduser()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -818,7 +1010,7 @@ def main(argv=None):
             .get("iteration", -1)
             + 1
         )
-        return do_test(cfg, model, f"manual_{iteration}")
+        return do_test(cfg, model, f"manual_{iteration}", process_group=distributed.get_process_subgroup())
     do_train(cfg, model, resume=not args.no_resume)
 
 
