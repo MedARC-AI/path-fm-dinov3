@@ -43,9 +43,9 @@ Change into the directory, then run the installation script:
 
 This will create a virtual environment, "dinov3", with all necessary packages pre-installed, located as a .venv folder in the same directory as path-fm-dinov3. It will automatically detect your machine's CUDA version and install packages appropriately.
 
-Note: We have only personally verified training works as intended with this repository using H100 GPUs.
+This install.sh script also downloads [our modified version of Meta's ViT-H+/16 checkpoint](https://huggingface.co/datasets/medarc/path-fm-dinov3/blob/main/dinov3_vith16plus_saved_teacher.pth) and places it into your `path-fm-dinov3/checkpoints/` folder. 
 
-Now download [our modified version of Meta's ViT-H+/16 checkpoint](https://huggingface.co/datasets/medarc/path-fm-dinov3/blob/main/dinov3_vith16plus_saved_teacher.pth) and place it into your `path-fm-dinov3/checkpoints/` folder. 
+Note: We have only personally verified training works as intended with this repository using H100 GPUs.
 
 Then, activate your environment and setup your wandb:
 
