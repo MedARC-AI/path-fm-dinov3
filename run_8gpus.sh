@@ -9,8 +9,8 @@ export NPROC_PER_NODE=8
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export NODE_RANK=0
 
-CONFIG_FILE="./dinov3/configs/train/vith16plus_8gpus.yaml"
-OUTPUT_DIR="./output_vith16plus_8gpu"
+CONFIG_FILE="./dinov3/configs/train/vitg14_reg4_8gpus_local.yaml"
+OUTPUT_DIR="/data/path-fm-dinov3/output_vitg14_reg4_8gpu_lowerlr"
 RESUME="True"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

@@ -8,6 +8,7 @@ from .checkpointer import (
     cleanup_checkpoint,
     find_all_checkpoints,
     find_latest_checkpoint,
+    adapt_dinov2_teacher_state_dict,
     init_fsdp_model_from_checkpoint,
     init_model_from_checkpoint_for_evals,
     keep_checkpoint_copy,

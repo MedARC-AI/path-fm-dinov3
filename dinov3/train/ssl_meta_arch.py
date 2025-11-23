@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from torch import Tensor, nn
 
 import dinov3.distributed as distributed
-from dinov3.checkpointer import init_fsdp_model_from_checkpoint
+from dinov3.checkpointer import adapt_dinov2_teacher_state_dict, init_fsdp_model_from_checkpoint
 from dinov3.configs import get_default_config
 from dinov3.data import DataAugmentationDINO
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
@@ -306,7 +306,16 @@ class SSLMetaArch(nn.Module):
         self.dino_loss.init_weights()
         self.ibot_patch_loss.init_weights()
         self.model_ema.load_state_dict(self.student.state_dict())
+
+        def _maybe_dinov2_transform(target):
+            if getattr(self.cfg.student, "load_dinov2_ckpt", False):
+                return partial(adapt_dinov2_teacher_state_dict, target_model=target)
+            return None
+
         if self.has_gram_teacher:
+            # Initialize buffers (e.g., qkv.bias_mask, RoPE) so missing keys in the checkpoint do not stay NaN
+            if hasattr(self.gram_teacher, "backbone") and hasattr(self.gram_teacher.backbone, "init_weights"):
+                self.gram_teacher.backbone.init_weights()
             if self.gram_ckpt is not None:
                 logger.info(f"Loading pretrained weights from {self.gram_ckpt}")
                 init_fsdp_model_from_checkpoint(
@@ -320,6 +329,7 @@ class SSLMetaArch(nn.Module):
                     ],
                     keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
                     process_group=distributed.get_default_process_group(),
+                    state_dict_transform=_maybe_dinov2_transform(self.gram_teacher),
                 )
                 self.gram_teacher_initialized = True
             else:
@@ -328,12 +338,14 @@ class SSLMetaArch(nn.Module):
             self.gram_teacher.eval()
         if self.cfg.student.resume_from_teacher_chkpt:
             logger.info(f"Loading pretrained weights from {self.cfg.student.resume_from_teacher_chkpt}")
+            resume_target = self.student.backbone if getattr(self.cfg.student, "load_dinov2_ckpt", False) else self.student
             init_fsdp_model_from_checkpoint(
-                self.student,
+                resume_target,
                 self.cfg.student.resume_from_teacher_chkpt,
                 skip_load_keys=["dino_loss.center", "ibot_patch_loss.center"],
-                keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
+                keys_not_sharded=["rope_embed.periods", "qkv.bias_mask"],
                 process_group=distributed.get_process_subgroup(),
+                state_dict_transform=_maybe_dinov2_transform(resume_target),
             )
             self.model_ema.load_state_dict(self.student.state_dict())
         if self.cfg.distillation.enabled:

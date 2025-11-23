@@ -27,7 +27,7 @@ train:
 student: # see vit_huge2 in dinov3/models/vision_transformer.py
   arch: vit_huge2
   patch_size: 16
-  drop_path_rate: 0.3 # dinov2 used 0.4
+  drop_path_rate: 0.4
   layerscale: 1.0e-05
   ffn_layer: swiglu
   ffn_ratio: 6.0
@@ -38,20 +38,20 @@ student: # see vit_huge2 in dinov3/models/vision_transformer.py
   pos_embed_rope_dtype: fp32
   resume_from_teacher_chkpt: ./checkpoints/dinov3_vith16plus_saved_teacher.pth
 teacher:
-  momentum_teacher: 0.992
+  momentum_teacher: 0.994
   final_momentum_teacher: 1.0
   warmup_teacher_temp: 0.04
   teacher_temp: 0.07
-  warmup_teacher_temp_epochs: 10 # 30
+  warmup_teacher_temp_epochs: 30
   in_chans: 3
 optim:
   epochs: 8000 
   early_stop: 200
   lr: .0002
-  weight_decay_end: 0.4
-  warmup_epochs: 10 # 30
+  weight_decay_end: 0.2
+  warmup_epochs: 10
   clip_grad: 3.0
-  layerwise_decay: 0.98
+  layerwise_decay: 1.0
   patch_embed_lr_mult: 0.2
 crops:
   use_pathology_hed: true

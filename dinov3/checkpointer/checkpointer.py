@@ -273,17 +273,106 @@ def _is_int(s: str) -> bool:
 
 
 # Initialize a FSDP2 model from DCP or PyTorch standard checkpoint
+def _shape_map(module: torch.nn.Module) -> dict[str, torch.Size]:
+    shapes: dict[str, torch.Size] = {}
+    shapes.update({k: p.shape for k, p in module.named_parameters()})
+    shapes.update({k: b.shape for k, b in module.named_buffers()})
+    return shapes
+
+
+def adapt_dinov2_teacher_state_dict(
+    state_dict: dict[str, torch.Tensor], target_model: torch.nn.Module
+) -> dict[str, torch.Tensor]:
+    """
+    Filter and rename a DINOv2 teacher checkpoint so it can load into a DINOv3 backbone:
+    - keep only backbone.* entries
+    - rename register_tokens -> storage_tokens
+    - drop positional embeddings (we use RoPE)
+    - drop anything that does not exist or shape-matches in the target model
+    """
+    target_shapes = _shape_map(target_model)
+    expects_backbone_prefix = any(k.startswith("backbone.") for k in target_shapes)
+    backbone_prefix = "backbone." if expects_backbone_prefix else ""
+    adapted: dict[str, torch.Tensor] = {}
+    for raw_key, tensor in state_dict.items():
+        key = raw_key.removeprefix("module.")
+        if not key.startswith("backbone."):
+            continue
+        key = key.replace("backbone.register_tokens", "backbone.storage_tokens")
+        key = key.removeprefix("backbone.")
+        if key.startswith("blocks."):
+            parts = key.split(".")
+            if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+                parts.pop(1)  # drop chunk index to flatten block numbering
+                key = ".".join(parts)
+        if "pos_embed" in key:
+            continue
+        if key.endswith("mlp.w12.weight"):
+            base = key.removesuffix("mlp.w12.weight")
+            hidden = tensor.shape[0] // 2
+            w1 = tensor[:hidden]
+            w2 = tensor[hidden:]
+            k1 = f"{backbone_prefix}{base}mlp.w1.weight"
+            k2 = f"{backbone_prefix}{base}mlp.w2.weight"
+            if target_shapes.get(k1) == w1.shape:
+                adapted[k1] = w1
+            if target_shapes.get(k2) == w2.shape:
+                adapted[k2] = w2
+            continue
+        if key.endswith("mlp.w12.bias"):
+            base = key.removesuffix("mlp.w12.bias")
+            hidden = tensor.shape[0] // 2
+            b1 = tensor[:hidden]
+            b2 = tensor[hidden:]
+            k1 = f"{backbone_prefix}{base}mlp.w1.bias"
+            k2 = f"{backbone_prefix}{base}mlp.w2.bias"
+            if target_shapes.get(k1) == b1.shape:
+                adapted[k1] = b1
+            if target_shapes.get(k2) == b2.shape:
+                adapted[k2] = b2
+            continue
+        full_key = f"{backbone_prefix}{key}"
+        if full_key not in target_shapes:
+            continue
+        if target_shapes[full_key] != tensor.shape:
+            continue
+        adapted[full_key] = tensor
+    return adapted
+
+
 def init_fsdp_model_from_checkpoint(
     model: torch.nn.Module,
     checkpoint_path: str,
     skip_load_keys: List[str] | None = None,
     keys_not_sharded: List[str] | None = None,
     process_group: dist.ProcessGroup = None,
+    state_dict_transform=None,
 ):
     if not Path(checkpoint_path).is_dir():  # PyTorch standard checkpoint
         logger.info(f"Loading pretrained weights from {checkpoint_path}")
         chkpt = torch.load(checkpoint_path, map_location="cpu")["teacher"]
         from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+
+        if state_dict_transform is not None:
+            chkpt = state_dict_transform(chkpt)
+
+        skip_load_keys = skip_load_keys or []
+        keys_not_sharded = keys_not_sharded or []
+
+        target_keys = set(model.state_dict().keys())
+        filtered = {k: v for k, v in chkpt.items() if not any(skip in k for skip in skip_load_keys)}
+        matching_keys = {k: v for k, v in filtered.items() if k in target_keys}
+        if len(matching_keys) == 0:
+            raise RuntimeError(
+                f"No checkpoint weights matched the model when loading {checkpoint_path}. "
+                "Check that prefixes match and that state_dict_transform is correct."
+            )
+        if len(filtered) != len(matching_keys):
+            logger.info(
+                "Filtered checkpoint keys: kept %d / %d after applying skip_load_keys and matching model parameters",
+                len(matching_keys),
+                len(filtered),
+            )
 
         if process_group is None:
             world_mesh = init_device_mesh(
@@ -293,21 +382,26 @@ def init_fsdp_model_from_checkpoint(
             )
         else:
             world_mesh = DeviceMesh.from_group(process_group, "cuda")
-        chkpt = {
+
+        state_dict_to_load = {
             key: (
                 torch.distributed.tensor.distribute_tensor(tensor, world_mesh, src_data_rank=None)
                 if not any(key_not_sharded in key for key_not_sharded in keys_not_sharded)
                 else tensor
             )
-            for key, tensor in chkpt.items()
+            for key, tensor in matching_keys.items()
         }
-        model.load_state_dict(
-            {
-                key: tensor
-                for key, tensor in chkpt.items()
-                if not any(skip_load_key in key for skip_load_key in skip_load_keys)
-            }
-        )
+
+        load_result = model.load_state_dict(state_dict_to_load, strict=state_dict_transform is None)
+        if len(load_result.missing_keys) == len(target_keys):
+            raise RuntimeError(
+                f"Checkpoint {checkpoint_path} did not load any parameters into the model. "
+                "This usually means the key prefixes are mismatched."
+            )
+        if load_result.missing_keys:
+            logger.info("Missing keys when loading %s: %d", checkpoint_path, len(load_result.missing_keys))
+        if load_result.unexpected_keys:
+            logger.info("Unexpected keys when loading %s: %d", checkpoint_path, len(load_result.unexpected_keys))
     else:  # DCP checkpoint
         load_checkpoint(ckpt_dir=checkpoint_path, model=model, process_group=process_group)
 

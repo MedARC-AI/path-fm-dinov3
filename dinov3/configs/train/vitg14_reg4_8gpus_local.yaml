@@ -2,18 +2,27 @@ dino:
   head_n_prototypes: 262144
   head_bottleneck_dim: 512
   head_hidden_dim: 8192
-  kde_loss_weight: 0.05 
-  koleo_loss_weight: 0.0 # 0 = no Ko Leo regularization
+  kde_loss_weight: 0.015
+  koleo_loss_weight: 0.01
 ibot:
   separate_head: true
   head_n_prototypes: 98304
   head_bottleneck_dim: 384
   head_hidden_dim: 4096
 gram:
-  use_loss: false # (bool) if true gram is used, else not
+  use_loss: true
+  ckpt: /home/paul/path-fm/checkpoints/teacher_epoch250000.pth
+  loss_weight: 0.02
+  it_first_update: 5000
+  it_load_ema_teacher: 5000
+  loss_weight_schedule:
+    start: 0.0
+    peak: 0.02
+    end: 0.02
+    warmup_epochs: 5
 train:
-  batch_size_per_gpu: 56 # 44 seems max for 1-gpu, 56 can work on full H100 node
-  num_workers: 4
+  batch_size_per_gpu: 36
+  num_workers: 10
   OFFICIAL_EPOCH_LENGTH: 1250
   centering: sinkhorn_knopp
   eval_and_ckpt_at_step0: true
@@ -23,43 +32,46 @@ train:
     path: /data/TCGA_parquet_sample30_shuffled
     shuffle_buffer: 50000
     base_seed: 42
-  dataset_path: "pathology:root=/data/TCGA/" # only used if streaming_from_hf is false
-student: # see vit_huge2 in dinov3/models/vision_transformer.py
-  arch: vit_huge2
-  patch_size: 16
-  drop_path_rate: 0.3 # dinov2 used 0.4
+  dataset_path: "pathology:root=/data/TCGA/"
+student:
+  arch: vit_giant2
+  patch_size: 14
+  drop_path_rate: 0.4
   layerscale: 1.0e-05
   ffn_layer: swiglu
-  ffn_ratio: 6.0
+  ffn_ratio: 4.0
   norm_layer: layernormbf16
   n_storage_tokens: 4
   mask_k_bias: true
   pos_embed_rope_rescale_coords: 2.0
   pos_embed_rope_dtype: fp32
-  resume_from_teacher_chkpt: ./checkpoints/dinov3_vith16plus_saved_teacher.pth
+  resume_from_teacher_chkpt: /home/paul/path-fm/checkpoints/teacher_epoch250000.pth
+  load_dinov2_ckpt: true
 teacher:
-  momentum_teacher: 0.992
+  momentum_teacher: 0.994
   final_momentum_teacher: 1.0
   warmup_teacher_temp: 0.04
   teacher_temp: 0.07
-  warmup_teacher_temp_epochs: 10 # 30
+  warmup_teacher_temp_epochs: 30
   in_chans: 3
 optim:
-  epochs: 8000 
+  epochs: 8000
   early_stop: 200
-  lr: .0002
-  weight_decay_end: 0.4
-  warmup_epochs: 10 # 30
+  lr: .00002
+  weight_decay_end: 0.2
+  warmup_epochs: 10
   clip_grad: 3.0
-  layerwise_decay: 0.98
+  layerwise_decay: 1.0
   patch_embed_lr_mult: 0.2
 crops:
   use_pathology_hed: true
+  local_crops_size: 98
+  gram_teacher_crops_size: 224
 evaluation:
-  eval_period_iterations: 2500 # save eval ckpt every x iterations (to be used for downstream)
+  eval_period_iterations: 2500
 checkpointing:
-  allow_resume: true # false means to not ever save training state (so resuming will not work)
-  period: 2500 # save training state every x iterations (to resume interrupted training runs)
+  allow_resume: true
+  period: 2500
   keep_every: 12500
 logging:
   use_wandb: true

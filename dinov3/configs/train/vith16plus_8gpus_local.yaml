@@ -2,8 +2,8 @@ dino:
   head_n_prototypes: 262144
   head_bottleneck_dim: 512
   head_hidden_dim: 8192
-  kde_loss_weight: 0.05 
-  koleo_loss_weight: 0.0 # 0 = no Ko Leo regularization
+  kde_loss_weight: 0.05
+  koleo_loss_weight: 0.0 # 0 = no Ko Leo regularization; default is 0.1
 ibot:
   separate_head: true
   head_n_prototypes: 98304
@@ -12,15 +12,15 @@ ibot:
 gram:
   use_loss: false # (bool) if true gram is used, else not
 train:
-  batch_size_per_gpu: 44 # 44 seems max for 1-gpu, 56 works on full H100 node
-  num_workers: 4
+  batch_size_per_gpu: 56 # 44 seems max for 1-gpu, 56 can work on full H100 node
+  num_workers: 10
   OFFICIAL_EPOCH_LENGTH: 1250
   centering: sinkhorn_knopp
   eval_and_ckpt_at_step0: true
   cache_dataset: true
   streaming_from_hf: true
   streaming_dataset:
-    path: medarc/TCGA-12K-parquet-shuffled
+    path: /data/TCGA_parquet_sample30_shuffled
     shuffle_buffer: 50000
     base_seed: 42
   dataset_path: "pathology:root=/data/TCGA/" # only used if streaming_from_hf is false
@@ -45,7 +45,7 @@ teacher:
   warmup_teacher_temp_epochs: 30
   in_chans: 3
 optim:
-  epochs: 12 # 8000
+  epochs: 8000 
   early_stop: 200
   lr: .0002
   weight_decay_end: 0.2
@@ -56,9 +56,9 @@ optim:
 crops:
   use_pathology_hed: true
 evaluation:
-  eval_period_iterations: 2000 # save eval ckpt every x iterations (to be used for downstream)
+  eval_period_iterations: 2500 # save eval ckpt every x iterations (to be used for downstream)
 checkpointing:
-  allow_resume: false # false means to not ever save training state (so resuming will not work)
+  allow_resume: true # false means to not ever save training state (so resuming will not work)
   period: 2500 # save training state every x iterations (to resume interrupted training runs)
   keep_every: 12500
 logging:
