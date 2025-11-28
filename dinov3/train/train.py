@@ -23,7 +23,6 @@ from torch.distributed._tensor import DTensor
 from omegaconf import OmegaConf
 
 import dinov3.distributed as distributed
-from dinov3.models import build_model_for_eval
 from dinov3.checkpointer import (
     find_latest_checkpoint,
     keep_checkpoint_copy,
@@ -377,43 +376,36 @@ def build_streaming_data_loader(cfg, data_transform, collate_fn):
 
 
 def do_test(cfg, model, iteration, process_group, do_low_freq=False):
-    # dump a sharded checkpoint
+    process_group = process_group or distributed.get_process_subgroup()
+    # dump a sharded eval checkpoint
     eval_dir = Path(cfg.train.output_dir) / "eval" / str(iteration)
     if distributed.is_subgroup_main_process():
         eval_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.train.sharded_eval_checkpoint:
-        ckpt_path = eval_dir / "sharded_teacher_checkpoint"
-        if distributed.is_subgroup_main_process():
-            ckpt_path.mkdir(parents=True, exist_ok=True)
-        torch.distributed.barrier()
-        teacher_backbone = model.model_ema
-        save_checkpoint(
-            ckpt_dir=ckpt_path, iteration=iteration, model=teacher_backbone, overwrite=True, process_group=process_group
-        )
     new_state_dict = model.model_ema.state_dict()
     for k, tensor in list(new_state_dict.items()):
         if isinstance(tensor, DTensor):
             new_state_dict[k] = tensor.full_tensor()
-    if not distributed.is_subgroup_main_process():
-        return
     ckpt_path = eval_dir / "teacher_checkpoint.pth"
-    torch.save({"teacher": new_state_dict}, ckpt_path)
-    logger.info("Saved eval checkpoint: %s", ckpt_path)
-
-    if not distributed.is_main_process():
-        return
+    if distributed.is_subgroup_main_process():
+        torch.save({"teacher": new_state_dict}, ckpt_path)
+        logger.info("Saved eval checkpoint: %s", ckpt_path)
+    # Release checkpoint tensors before continuing
+    del new_state_dict
+    torch.cuda.empty_cache()
 
     repo_root = Path(__file__).resolve().parents[2]
     bach_root = repo_root / "eva-probe" / "data" / "bach"
     if not bach_root.is_dir():
         logger.info("Skipping BACH eval; dataset path missing: %s", bach_root)
+        torch.distributed.barrier(process_group)
         return
 
-    teacher = build_model_for_eval(cfg, str(ckpt_path))
-    teacher.eval()
-    teacher.requires_grad_(False)
+    # Reuse the sharded EMA teacher for evaluation to avoid instantiating a full extra model
+    teacher_backbone = model.model_ema["backbone"]
+    teacher_backbone.eval()
+    teacher_backbone.requires_grad_(False)
 
-    device = next(teacher.parameters()).device
+    device = next(teacher_backbone.parameters()).device
 
     class _ResizeAndCrop(v2.Compose):
         def __init__(self, size=224, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
@@ -493,15 +485,22 @@ def do_test(cfg, model, iteration, process_group, do_low_freq=False):
     train_ds = _BACHDataset(root=str(bach_root), split="train", transform=transform)
     val_ds = _BACHDataset(root=str(bach_root), split="val", transform=transform)
 
-    predict_batch_size = 64
-    num_workers = 4
+    predict_batch_size = 8  # keep eval batch small to avoid OOM on large models
 
     def _compute_embeddings(dataset):
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=distributed.get_subgroup_size(),
+            rank=distributed.get_subgroup_rank(),
+            shuffle=False,
+            drop_last=False,
+        )
         loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=predict_batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            sampler=sampler,
+            num_workers=cfg.train.num_workers,
             pin_memory=True,
         )
         feats = []
@@ -510,87 +509,155 @@ def do_test(cfg, model, iteration, process_group, do_low_freq=False):
             for images, labels in loader:
                 images = images.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
-                out = teacher(images, is_training=True)
+                out = teacher_backbone(images, is_training=True)
                 cls = out["x_norm_clstoken"]
-                feats.append(cls)
-                targets.append(labels)
-        feats = torch.cat(feats, dim=0)
-        targets = torch.cat(targets, dim=0)
+                feats.append(cls.detach().cpu())
+                targets.append(labels.detach().cpu())
+        if feats:
+            feats = torch.cat(feats, dim=0)
+            targets = torch.cat(targets, dim=0)
+        else:
+            feats = torch.empty(0, device="cpu")
+            targets = torch.empty(0, device="cpu", dtype=torch.long)
+
+        gathered_feats: list[torch.Tensor] = [None for _ in range(distributed.get_subgroup_size())] 
+        gathered_targets: list[torch.Tensor] = [None for _ in range(distributed.get_subgroup_size())] 
+        torch.distributed.all_gather_object(gathered_feats, feats, group=process_group)
+        torch.distributed.all_gather_object(gathered_targets, targets, group=process_group)
+        feats = torch.cat(gathered_feats, dim=0)
+        targets = torch.cat(gathered_targets, dim=0)
         return feats, targets
 
     train_feats, train_targets = _compute_embeddings(train_ds)
     val_feats, val_targets = _compute_embeddings(val_ds)
 
-    in_features = train_feats.shape[-1]
-    num_classes = 4
-    head = torch.nn.Linear(in_features, num_classes, bias=True).to(device)
-    criterion = torch.nn.CrossEntropyLoss().to(device)
-    optimizer = torch.optim.AdamW(head.parameters(), lr=3e-4)
+    run_head_training = distributed.is_subgroup_main_process()
+    if run_head_training:
+        feature_dtype = torch.float32  # ensure backbone features and head weights share dtype
+        train_feats = train_feats.to(device, dtype=feature_dtype, non_blocking=True)
+        train_targets = train_targets.to(device, non_blocking=True)
+        val_feats = val_feats.to(device, dtype=feature_dtype, non_blocking=True)
+        val_targets = val_targets.to(device, non_blocking=True)
 
-    train_dataset = torch.utils.data.TensorDataset(train_feats, train_targets)
-    train_batch_size = 256
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=train_batch_size,
-        shuffle=True,
-        drop_last=False,
-    )
+        in_features = train_feats.shape[-1]
+        num_classes = 4
+        head = torch.nn.Linear(in_features, num_classes, bias=True).to(device)
+        criterion = torch.nn.CrossEntropyLoss().to(device)
+        optimizer = torch.optim.AdamW(head.parameters(), lr=3e-4, weight_decay=1e-2)
 
-    max_steps = 12500 # eva originally uses 12500 steps with patience-based early stopping
-    steps = 0
-    head.train()
-    with tqdm(total=max_steps) as pbar:
-        while steps < max_steps:
-            for feats_batch, targets_batch in train_loader:
-                feats_batch = feats_batch.to(device, non_blocking=True)
-                targets_batch = targets_batch.to(device, non_blocking=True)
-                logits = head(feats_batch)
-                loss = criterion(logits, targets_batch)
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
-                steps += 1
-                pbar.update(1)
-                if steps >= max_steps:
-                    break
+        train_dataset = torch.utils.data.TensorDataset(train_feats, train_targets)
+        train_batch_size = 256
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=train_batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
 
-    head.eval()
-    all_preds = []
-    all_targets = []
-    val_dataset = torch.utils.data.TensorDataset(val_feats, val_targets)
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=train_batch_size,
-        shuffle=False,
-        drop_last=False,
-    )
-    with torch.no_grad():
-        for feats_batch, targets_batch in val_loader:
-            feats_batch = feats_batch.to(device, non_blocking=True)
-            logits = head(feats_batch)
-            preds = logits.argmax(dim=1).cpu()
-            all_preds.append(preds)
-            all_targets.append(targets_batch.cpu())
+        val_dataset = torch.utils.data.TensorDataset(val_feats, val_targets)
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=train_batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
 
-    preds = torch.cat(all_preds, dim=0)
-    targets = torch.cat(all_targets, dim=0)
+        def _eval_head():
+            head.eval()
+            all_preds = []
+            all_targets = []
+            with torch.no_grad():
+                for feats_batch, targets_batch in val_loader:
+                    feats_batch = feats_batch.to(device, non_blocking=True)
+                    logits = head(feats_batch)
+                    preds = logits.argmax(dim=1).cpu()
+                    all_preds.append(preds)
+                    all_targets.append(targets_batch.cpu())
+            preds = torch.cat(all_preds, dim=0)
+            targets = torch.cat(all_targets, dim=0)
+            plain_acc = float((preds == targets).float().mean().item())
+            conf = torch.zeros(num_classes, num_classes, dtype=torch.long)
+            indices = targets * num_classes + preds
+            bincount = torch.bincount(indices, minlength=num_classes * num_classes)
+            conf = bincount.view(num_classes, num_classes)
+            per_class = conf.diag().float() / conf.sum(dim=1).clamp_min(1)
+            balanced_acc = float(per_class.mean().item())
+            head.train()
+            return plain_acc, balanced_acc
 
-    conf = torch.zeros(num_classes, num_classes, dtype=torch.long)
-    indices = targets * num_classes + preds
-    bincount = torch.bincount(indices, minlength=num_classes * num_classes)
-    conf = bincount.view(num_classes, num_classes)
-    per_class = conf.diag().float() / conf.sum(dim=1).clamp_min(1)
-    bach_acc = float(per_class.mean().item())
+        max_steps = 12500  # eva uses 12500 steps with patience-based early stopping
+        eval_every = 250
+        patience = 1250
+        steps = 0
+        best_plain = -1.0
+        best_balanced = -1.0
+        best_state = None
+        steps_since_improve = 0
+        head.train()
+        with tqdm(total=max_steps) as pbar:
+            while steps < max_steps:
+                for feats_batch, targets_batch in train_loader:
+                    feats_batch = feats_batch.to(device, non_blocking=True)
+                    targets_batch = targets_batch.to(device, non_blocking=True)
+                    logits = head(feats_batch)
+                    loss = criterion(logits, targets_batch)
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+                    steps += 1
+                    pbar.update(1)
+                    if steps % eval_every == 0 or steps >= max_steps:
+                        plain_acc, balanced_acc = _eval_head()
+                        if plain_acc > best_plain:
+                            best_plain = plain_acc
+                            best_balanced = balanced_acc
+                            best_state = {k: v.cpu() for k, v in head.state_dict().items()}
+                            steps_since_improve = 0
+                        else:
+                            steps_since_improve += eval_every
+                        if steps_since_improve >= patience:
+                            steps = max_steps
+                            break
+                    if steps >= max_steps:
+                        break
 
-    logger.info("BACH val balanced accuracy (linear probe): %.4f", bach_acc)
-
-    if wandb_run is not None and wandb_module is not None and distributed.is_main_process():
-        if isinstance(iteration, int):
-            step = iteration
+        if best_state is not None:
+            head.load_state_dict(best_state)
+            bach_acc_plain, bach_acc_balanced = best_plain, best_balanced
         else:
-            s = str(iteration).split("_")[-1]
-            step = int(s)
-        wandb_module.log({"val/BACH_MULTICLASS_ACCURACY": bach_acc}, step=step)
+            bach_acc_plain, bach_acc_balanced = _eval_head()
+
+        logger.info(
+            "BACH val accuracy (linear probe): plain=%.4f balanced=%.4f",
+            bach_acc_plain,
+            bach_acc_balanced,
+        )
+
+        if wandb_run is not None and wandb_module is not None and distributed.is_main_process():
+            if isinstance(iteration, int):
+                step = iteration
+            else:
+                s = str(iteration).split("_")[-1]
+                step = int(s)
+            wandb_module.log(
+                {
+                    "val/BACH_BALANCED_ACCURACY": bach_acc_balanced,
+                    "val/BACH_MULTICLASS_ACCURACY": bach_acc_plain,
+                },
+                step=step,
+            )
+
+        # Free eval resources before resuming training
+        del head, optimizer, train_loader, val_loader, train_dataset, val_dataset
+        del train_feats, train_targets, val_feats, val_targets
+        torch.cuda.empty_cache()
+        gc.collect()
+    else:
+        # Non-main ranks can drop gathered features
+        del train_feats, train_targets, val_feats, val_targets
+        gc.collect()
+
+    torch.distributed.barrier(process_group)
 
 
 def build_data_loader_from_cfg(
@@ -840,6 +907,10 @@ def do_train(cfg, model, resume=False):
                 logger.info("Reached target iteration %d/%d; stopping training loop.", iteration, stop_iter)
                 break
 
+            if iteration % cfg.evaluation.eval_period_iterations == 0 and (iteration > 0 or cfg.train.eval_and_ckpt_at_step0):
+                do_test(cfg, model, f"training_{iteration}", process_group=process_subgroup)
+                torch.cuda.synchronize()
+
             it = iteration
             data["global_batch_size"] = global_batch_size
 
@@ -933,28 +1004,24 @@ def do_train(cfg, model, resume=False):
                     wandb_log[f"train/{key}"] = value.item() if isinstance(value, torch.Tensor) else float(value)
                 wandb_module.log(wandb_log, step=iteration)
 
-            if iteration % cfg.evaluation.eval_period_iterations == 0 and (iteration > 0 or cfg.train.eval_and_ckpt_at_step0):
-                do_test(cfg, model, f"training_{iteration}", process_group=process_subgroup)
-                torch.cuda.synchronize()
-
-            if (
-                allow_resume
-                and iteration % cfg.checkpointing.period == 0
-                and (iteration > 0 or cfg.train.eval_and_ckpt_at_step0)
-            ):
-                torch.cuda.synchronize()
-                save_checkpoint(
-                    ckpt_dir / str(iteration),
-                    iteration=iteration,
-                    model=model,
-                    optimizer=optimizer,
-                    overwrite=True,
-                    process_group=process_subgroup,
-                )
-                if distributed.is_subgroup_main_process():
-                    keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
-                    if "keep_every" in cfg.checkpointing and iteration % cfg.checkpointing.keep_every == 0:
-                        keep_checkpoint_copy(ckpt_dir / str(iteration))
+            # if (
+            #     allow_resume
+            #     and iteration % cfg.checkpointing.period == 0
+            #     and (iteration > 0 or cfg.train.eval_and_ckpt_at_step0)
+            # ):
+            #     torch.cuda.synchronize()
+            #     save_checkpoint(
+            #         ckpt_dir / str(iteration),
+            #         iteration=iteration,
+            #         model=model,
+            #         optimizer=optimizer,
+            #         overwrite=True,
+            #         process_group=process_subgroup,
+            #     )
+            #     if distributed.is_subgroup_main_process():
+            #         keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
+            #         if "keep_every" in cfg.checkpointing and iteration % cfg.checkpointing.keep_every == 0:
+            #             keep_checkpoint_copy(ckpt_dir / str(iteration))
 
             iteration = iteration + 1
 

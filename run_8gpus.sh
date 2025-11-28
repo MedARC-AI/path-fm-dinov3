@@ -9,9 +9,9 @@ export NPROC_PER_NODE=8
 export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export NODE_RANK=0
 
-CONFIG_FILE="./dinov3/configs/train/vith16plus_8gpus.yaml"
-OUTPUT_DIR="./output_vith16plus_8gpu"
-RESUME="True"
+CONFIG_FILE="./dinov3/configs/train/vit7b16_8gpus_localsvs.yaml"
+OUTPUT_DIR="/data/path-fm-dinov3/output_vit7b16_8gpu"
+RESUME="False"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 export DINOV3_RUN_SCRIPT="${REPO_ROOT}/$(basename "${BASH_SOURCE[0]}")"

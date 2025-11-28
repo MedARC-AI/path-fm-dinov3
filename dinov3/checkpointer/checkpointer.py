@@ -280,6 +280,29 @@ def init_fsdp_model_from_checkpoint(
     keys_not_sharded: List[str] | None = None,
     process_group: dist.ProcessGroup = None,
 ):
+    skip_load_keys = skip_load_keys or []
+    keys_not_sharded = keys_not_sharded or []
+
+    def _drop_head_mismatches(state_dict: dict, model_state: dict):
+        """Remove dino/ibot head keys whose shapes do not match; error on any other mismatch."""
+        head_mismatch_keys = []
+        other_mismatch_keys = []
+        for key, tensor in state_dict.items():
+            if key not in model_state:
+                continue
+            if model_state[key].shape != tensor.shape:
+                if key.startswith("dino_head") or key.startswith("ibot_head"):
+                    head_mismatch_keys.append(key)
+                else:
+                    other_mismatch_keys.append(key)
+        if other_mismatch_keys:
+            raise RuntimeError(f"Shape mismatches not in heads: {other_mismatch_keys}")
+        if head_mismatch_keys:
+            for key in head_mismatch_keys:
+                state_dict.pop(key, None)
+            logger.warning(f"Skipping head parameters with size mismatches: {head_mismatch_keys}")
+        return state_dict
+
     if not Path(checkpoint_path).is_dir():  # PyTorch standard checkpoint
         logger.info(f"Loading pretrained weights from {checkpoint_path}")
         chkpt = torch.load(checkpoint_path, map_location="cpu")["teacher"]
@@ -301,13 +324,21 @@ def init_fsdp_model_from_checkpoint(
             )
             for key, tensor in chkpt.items()
         }
-        model.load_state_dict(
-            {
-                key: tensor
-                for key, tensor in chkpt.items()
-                if not any(skip_load_key in key for skip_load_key in skip_load_keys)
-            }
-        )
+        chkpt = {
+            key: tensor
+            for key, tensor in chkpt.items()
+            if not any(skip_load_key in key for skip_load_key in skip_load_keys)
+        }
+        chkpt = _drop_head_mismatches(chkpt, model.state_dict())
+        msg = model.load_state_dict(chkpt, strict=False)
+        allowed_missing = tuple(skip_load_keys) + ("dino_head", "ibot_head")
+        unexpected_missing = [k for k in msg.missing_keys if not any(a in k for a in allowed_missing)]
+        unexpected_unexpected = [k for k in msg.unexpected_keys if not any(a in k for a in allowed_missing)]
+        if unexpected_missing or unexpected_unexpected:
+            raise RuntimeError(
+                f"Unexpected missing or unexpected keys when loading checkpoint. "
+                f"missing={unexpected_missing}, unexpected={unexpected_unexpected}"
+            )
     else:  # DCP checkpoint
         load_checkpoint(ckpt_dir=checkpoint_path, model=model, process_group=process_group)
 
@@ -322,8 +353,11 @@ def init_model_from_checkpoint_for_evals(
         state_dict = state_dict[checkpoint_key]
     # remove `module.` prefix
     state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    # remove `backbone.` prefix induced by multicrop wrapper
-    state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
+    model_state = model.state_dict()
+    strip_backbone_prefix = not any(k.startswith("backbone.") for k in model_state.keys())
+    # remove `backbone.` prefix induced by multicrop wrapper unless the target expects it
+    if strip_backbone_prefix:
+        state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
     msg = model.load_state_dict(state_dict, strict=False)
     logger.info("Pretrained weights found at {} and loaded with msg: {}".format(pretrained_weights, msg))
 

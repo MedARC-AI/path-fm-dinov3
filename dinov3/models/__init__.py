@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from dinov3.layers.fp8_linear import convert_linears_to_fp8
+from dinov3.layers.dino_head import DINOHead
 
 from . import vision_transformer as vits
 
@@ -88,15 +89,39 @@ def build_model_from_cfg(cfg, only_teacher: bool = False):
         return student, teacher, embed_dim
 
 
-def build_model_for_eval(
-    config,
-    pretrained_weights: Union[str, Path] | None,
-    shard_unsharded_model: bool = False,  # If the model is not sharded, shard it. No effect if already sharded on disk
-):
-    model, _ = build_model_from_cfg(config, only_teacher=True)
+def build_model_for_eval(config, pretrained_weights: Union[str, Path] | None):
+    backbone, embed_dim = build_model_from_cfg(config, only_teacher=True)
+
+    class _EvalTeacher(nn.Module):
+        """Backbone wrapper that also carries DINO/iBOT heads so checkpoints load cleanly."""
+
+        def __init__(self, backbone, embed_dim, cfg):
+            super().__init__()
+            self.backbone = backbone
+            self.dino_head = DINOHead(
+                in_dim=embed_dim,
+                out_dim=cfg.dino.head_n_prototypes,
+                hidden_dim=cfg.dino.head_hidden_dim,
+                bottleneck_dim=cfg.dino.head_bottleneck_dim,
+                nlayers=cfg.dino.head_nlayers,
+            )
+            self.ibot_head = DINOHead(
+                in_dim=embed_dim,
+                out_dim=cfg.ibot.head_n_prototypes,
+                hidden_dim=cfg.ibot.head_hidden_dim,
+                bottleneck_dim=cfg.ibot.head_bottleneck_dim,
+                nlayers=cfg.ibot.head_nlayers,
+            )
+
+        def forward(self, *args, **kwargs):
+            return self.backbone(*args, **kwargs)
+
+    model = _EvalTeacher(backbone, embed_dim, config)
     if pretrained_weights is None or pretrained_weights == "":
         logger.info("No pretrained weights")
-        model.init_weights()
+        model.backbone.init_weights()
+        model.dino_head.init_weights()
+        model.ibot_head.init_weights()
     elif Path(pretrained_weights).is_dir():
         logger.info("PyTorch DCP checkpoint")
         from dinov3.checkpointer import load_checkpoint
@@ -109,7 +134,6 @@ def build_model_for_eval(
         model.to_empty(device="cuda")
         # Load checkpoint
         load_checkpoint(pretrained_weights, model=moduledict, strict_loading=True)
-        shard_unsharded_model = False
     else:
         logger.info("PyTorch consolidated checkpoint")
         from dinov3.checkpointer import init_model_from_checkpoint_for_evals
@@ -117,9 +141,5 @@ def build_model_for_eval(
         # consolidated checkpoint codepath
         model.to_empty(device="cuda")
         init_model_from_checkpoint_for_evals(model, pretrained_weights, "teacher")
-    if shard_unsharded_model:
-        logger.info("Sharding model")
-        moduledict = nn.ModuleDict({"backbone": model})
-        ac_compile_parallelize(moduledict, inference_only_models=[], cfg=config)
     model.eval()
     return model

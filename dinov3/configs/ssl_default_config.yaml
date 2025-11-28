@@ -80,7 +80,6 @@ train:
   checkpointing_full: false  # aggressive checkpointing
   compile: true
   cudagraphs: false
-  sharded_eval_checkpoint: false
   cache_dataset: false
   streaming_from_hf: false
   streaming_dataset:

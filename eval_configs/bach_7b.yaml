@@ -3,7 +3,7 @@ trainer:
   class_path: eva.Trainer
   init_args:
     n_runs: &N_RUNS ${oc.env:N_RUNS, 5}
-    default_root_dir: &OUTPUT_ROOT ${oc.env:OUTPUT_ROOT, logs/${oc.env:MODEL_NAME, dinov3_vith16plus}/offline/bach}
+    default_root_dir: &OUTPUT_ROOT ${oc.env:OUTPUT_ROOT, logs/${oc.env:MODEL_NAME, dinov3_vit7b16}/offline/bach}
     max_steps: &MAX_STEPS ${oc.env:MAX_STEPS, 12500}
     checkpoint_type: ${oc.env:CHECKPOINT_TYPE, best}
     accelerator: ${oc.env:ACCELERATOR, auto}
@@ -31,7 +31,7 @@ trainer:
           mode: *MONITOR_METRIC_MODE
       - class_path: eva.callbacks.ClassificationEmbeddingsWriter
         init_args:
-          output_dir: &EMBEDDINGS_ROOT ${resolve_embeddings_root:${oc.env:EMBEDDINGS_ROOT, ""}, ${oc.env:CHECKPOINT_PATH, ""}, ${oc.env:MODEL_NAME, dinov3_vith16plus}, bach}
+          output_dir: &EMBEDDINGS_ROOT ${resolve_embeddings_root:${oc.env:EMBEDDINGS_ROOT, ""}, ${oc.env:CHECKPOINT_PATH, ""}, ${oc.env:MODEL_NAME, dinov3_vit7b16}, bach}
           dataloader_idx_map:
             0: train
             1: val
@@ -40,11 +40,8 @@ trainer:
             init_args:
               path: torch.hub.load
               arguments:
-                repo_or_dir: /home/paul/dinov3
-                model: auto
-                source: local
-                pretrained: false
-              checkpoint_path: &CHECKPOINT_PATH ${oc.env:CHECKPOINT_PATH, /data/path-fm-dinov3/output_vith16plus_8gpu/eval/training_200000/teacher_checkpoint.pth}
+                model: dinov3_vit7b16
+              checkpoint_path: &CHECKPOINT_PATH ${oc.env:CHECKPOINT_PATH, /home/paul/dinov3/checkpoints/dinov3_vit7b16_saved_teacher.pth}
 
           overwrite: true
     logger:
@@ -58,7 +55,7 @@ model:
     head:
       class_path: torch.nn.Linear
       init_args:
-        in_features: ${oc.env:IN_FEATURES, 1280}
+        in_features: ${oc.env:IN_FEATURES, 4096}
         out_features: &NUM_CLASSES 4
     criterion: torch.nn.CrossEntropyLoss
     optimizer:

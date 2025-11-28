@@ -1,27 +1,27 @@
 dino:
-  head_n_prototypes: 262144
-  head_bottleneck_dim: 512
-  head_hidden_dim: 8192
-  kde_loss_weight: 0.01 # 0.05
+  head_n_prototypes: 131072 #262144
+  head_bottleneck_dim: 384 #1024
+  head_hidden_dim: 2048 #16384
+  kde_loss_weight: 0.05 # 0.05
   koleo_loss_weight: 0.0 # 0 = no Ko Leo regularization
 ibot:
   separate_head: true
-  head_n_prototypes: 98304
-  head_bottleneck_dim: 384
-  head_hidden_dim: 4096
+  head_n_prototypes: 131072 #98304
+  head_bottleneck_dim: 256 #768
+  head_hidden_dim: 2048 #8192
 gram:
-  use_loss: true
-  ckpt: ./checkpoints/dinov3_vith16plus_saved_teacher.pth
-  loss_weight: 0.02
-  it_first_update: 5000
-  it_load_ema_teacher: 5000
-  loss_weight_schedule:
-    start: 0.0
-    peak: 0.02
-    end: 0.02
-    warmup_epochs: 5
+  use_loss: false
+  # ckpt: ./checkpoints/dinov3_vit7b16_saved_teacher.pth
+  # loss_weight: 0.02
+  # it_first_update: 5000
+  # it_load_ema_teacher: 5000
+  # loss_weight_schedule:
+  #   start: 0.0
+  #   peak: 0.02
+  #   end: 0.02
+  #   warmup_epochs: 5
 train:
-  batch_size_per_gpu: 48 # 44 seems max for 1-gpu, 56 can work on full H100 node
+  batch_size_per_gpu: 32 #48 # 44 seems max for 1-gpu, 56 can work on full H100 node
   num_workers: 10
   OFFICIAL_EPOCH_LENGTH: 1250
   centering: sinkhorn_knopp
@@ -33,19 +33,26 @@ train:
     shuffle_buffer: 50000
     base_seed: 42
   dataset_path: "pathology:root=/data/TCGA/" # only used if streaming_from_hf is false
-student: # see vit_huge2 in dinov3/models/vision_transformer.py
-  arch: vit_huge2
+  checkpointing: true # enable to save memory
+  checkpointing_full: false  # requires checkpointing also be true; more aggressive checkpointing
+student:
+  arch: vit_7b
   patch_size: 16
-  drop_path_rate: 0.3 # dinov2 used 0.4
+  drop_path_rate: 0.4
   layerscale: 1.0e-05
-  ffn_layer: swiglu
-  ffn_ratio: 6.0
+  ffn_layer: swiglu64
+  ffn_ratio: 3.0
   norm_layer: layernormbf16
   n_storage_tokens: 4
+  qkv_bias: false
+  proj_bias: true
+  ffn_bias: true
   mask_k_bias: true
-  pos_embed_rope_rescale_coords: 2.0
+  untie_global_and_local_cls_norm: true
+  pos_embed_rope_rescale_coords: 2
   pos_embed_rope_dtype: fp32
-  resume_from_teacher_chkpt: ./checkpoints/dinov3_vith16plus_saved_teacher.pth
+  resume_from_teacher_chkpt: ./checkpoints/dinov3_vit7b16_saved_teacher_smallheads.pth
+  fp8_enabled: true # further save memory with fp8
 teacher:
   momentum_teacher: 0.994
   final_momentum_teacher: 1.0
@@ -54,9 +61,9 @@ teacher:
   warmup_teacher_temp_epochs: 10 # 30
   in_chans: 3
 optim:
-  epochs: 8000 
+  epochs: 8000
   early_stop: 200
-  lr: .0001 # .0002
+  lr: .0002
   weight_decay_end: 0.2
   warmup_epochs: 10 # 30
   clip_grad: 3.0
