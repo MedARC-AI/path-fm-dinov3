@@ -1004,24 +1004,24 @@ def do_train(cfg, model, resume=False):
                     wandb_log[f"train/{key}"] = value.item() if isinstance(value, torch.Tensor) else float(value)
                 wandb_module.log(wandb_log, step=iteration)
 
-            # if (
-            #     allow_resume
-            #     and iteration % cfg.checkpointing.period == 0
-            #     and (iteration > 0 or cfg.train.eval_and_ckpt_at_step0)
-            # ):
-            #     torch.cuda.synchronize()
-            #     save_checkpoint(
-            #         ckpt_dir / str(iteration),
-            #         iteration=iteration,
-            #         model=model,
-            #         optimizer=optimizer,
-            #         overwrite=True,
-            #         process_group=process_subgroup,
-            #     )
-            #     if distributed.is_subgroup_main_process():
-            #         keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
-            #         if "keep_every" in cfg.checkpointing and iteration % cfg.checkpointing.keep_every == 0:
-            #             keep_checkpoint_copy(ckpt_dir / str(iteration))
+            if (
+                allow_resume
+                and iteration % cfg.checkpointing.period == 0
+                and (iteration > 0 or cfg.train.eval_and_ckpt_at_step0)
+            ):
+                torch.cuda.synchronize()
+                save_checkpoint(
+                    ckpt_dir / str(iteration),
+                    iteration=iteration,
+                    model=model,
+                    optimizer=optimizer,
+                    overwrite=True,
+                    process_group=process_subgroup,
+                )
+                if distributed.is_subgroup_main_process():
+                    keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
+                    if "keep_every" in cfg.checkpointing and iteration % cfg.checkpointing.keep_every == 0:
+                        keep_checkpoint_copy(ckpt_dir / str(iteration))
 
             iteration = iteration + 1
 
