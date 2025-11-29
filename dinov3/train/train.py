@@ -381,7 +381,8 @@ def do_test(cfg, model, iteration, process_group, do_low_freq=False):
     eval_dir = Path(cfg.train.output_dir) / "eval" / str(iteration)
     if distributed.is_subgroup_main_process():
         eval_dir.mkdir(parents=True, exist_ok=True)
-    new_state_dict = model.model_ema.state_dict()
+    # Save the non-EMA teacher so eval checkpoints reflect the current teacher weights
+    new_state_dict = model.teacher.state_dict()
     for k, tensor in list(new_state_dict.items()):
         if isinstance(tensor, DTensor):
             new_state_dict[k] = tensor.full_tensor()
@@ -400,8 +401,8 @@ def do_test(cfg, model, iteration, process_group, do_low_freq=False):
         torch.distributed.barrier(process_group)
         return
 
-    # Reuse the sharded EMA teacher for evaluation to avoid instantiating a full extra model
-    teacher_backbone = model.model_ema["backbone"]
+    # Reuse the non-EMA teacher for evaluation to avoid instantiating a full extra model
+    teacher_backbone = model.teacher["backbone"]
     teacher_backbone.eval()
     teacher_backbone.requires_grad_(False)
 
